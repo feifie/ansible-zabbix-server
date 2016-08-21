@@ -1,35 +1,7 @@
 ---
 # Tasks specific for RedHat systems
 
-- name: "RedHat | Set short version name"
-  set_fact:
-      zabbix_short_version: "{{ zabbix_version | regex_replace('\\.', '') }}"
-  tags:
-    - zabbix-server
-
-- name: "RedHat | Use Zabbix package name"
-  set_fact:
-      zabbix_server_package: "zabbix-server-{{ database_type }}"
-  when: zabbix_repo == "zabbix"
-  tags:
-    - zabbix-server
-
-- name: "RedHat | Use EPEL package name"
-  set_fact:
-      zabbix_server_package: "zabbix{{ zabbix_short_version }}-server-{{ database_type }}"
-  when: zabbix_repo == "epel"
-  tags:
-    - zabbix-server
-
-- name: "RedHat | Set some facts EPEL"
-  set_fact:
-    apache_log: httpd
-    datafiles_path: "/usr/share/zabbix-{{ database_type_long }}"
-  when: zabbix_repo == "epel"
-  tags:
-    - zabbix-server
-
-- name: "RedHat | Set some facts Zabbix"
+- name: "RedHat | Set some facts"
   set_fact:
     apache_log: httpd
     datafiles_path: "/usr/share/doc/zabbix-server-{{ database_type }}-{{ zabbix_version }}*/create"
@@ -51,12 +23,12 @@
             owner=root
             group=root
             mode=0644
-  when: zabbix_repo == "zabbix"
+  when: zabbix_repo
   tags:
     - zabbix-server
 
 - name: "RedHat | Installing zabbix-server-{{ database_type }}"
-  yum:  pkg={{ zabbix_server_package }}
+  yum:  pkg=zabbix-server-{{ database_type }}
         state=present
   tags:
     - zabbix-server
@@ -92,9 +64,34 @@
   with_items:
     - mariadb
     - MySQL-python
+    - mariadb-server
+  when: database_type == 'mysql' and ansible_distribution_major_version == "7"
+  notify: restart mariadb
+  tags:
+    - zabbix-server
+
+- name: "RedHat | Enable mariadb"
+  shell: "systemctl restart mariadb && systemctl enable mariadb"
   when: database_type == 'mysql' and ansible_distribution_major_version == "7"
   tags:
     - zabbix-server
+
+- name: "RedHat | Install some other packages"
+  yum: name={{ item }} state=present
+  with_items:
+    - trousers
+    - gnutls
+  when: database_type == 'mysql' and ansible_distribution_major_version == "7"
+  tags:
+    - zabbix-server
+
+- name: "RedHat | Open firewall pork"
+  shell: "firewall-cmd --zone=public --add-port={80/tcp,10051/tcp} --permanent && firewall-cmd --reload && systemctl restart httpd"
+  when: ansible_distribution_major_version == "7"
+  notify: restart apache
+  tags:
+    - zabbix-server
+    - firewall
 
 - name: "RedHat | Install Mysql Client package RHEL5 - 6"
   yum: name={{ item }}
@@ -107,37 +104,42 @@
     - zabbix-server
 
 - name: "RedHat | Install PostgreSQL client package"
-  yum: name=postgresql
+  yum: name={{ item }}
        state=latest
+  with_items:
+    - postgresql
+    - postgresql-server
   when: database_type == 'pgsql'
   tags:
     - zabbix-server
 
-- name: "RedHat | Install related SELinux package"
-  yum: name={{ item }}
-       state=present
-  with_items:
-    - libsemanage-python
-  when: zabbix_web or selinux_allow_zabbix_can_network
+- name: "RedHat | init pgsql database"
+  shell: "postgresql-setup initdb && touch /etc/zabbix/initdb.done"
+  args:
+    creates: /etc/zabbix/initdb.done
+  when: database_type == 'pgsql'
   tags:
     - zabbix-server
 
-- name: "RedHat | Enable httpd_can_connect_zabbix SELinux boolean"
-  seboolean: name={{ item }}
-             state=yes
-             persistent=yes
+- name: "RedHat | change pgsql conf1"
+  lineinfile: dest=/var/lib/pgsql/data/pg_hba.conf state={{ item.state }} line={{ item.line }}
   with_items:
-    - httpd_can_connect_zabbix
-  when: zabbix_web and selinux_allow_zabbix_can_http
+    - { state: 'absent', line: 'host    all             all             127.0.0.1/32            ident' }
+    - { state: 'absent', line: 'host    all             all             ::1/128                 ident' }
+    - { state: 'present', line: 'host    all             all             127.0.0.1/32            md5' }
+    - { state: 'present', line: 'host    all             all             ::1/128                 md5' }
+  when: database_type == 'pgsql'
   tags:
     - zabbix-server
 
-- name: "RedHat | Enable zabbix_can_network SELinux boolean"
-  seboolean: name={{ item }}
-             state=yes
-             persistent=yes
-  with_items:
-    - zabbix_can_network
-  when: selinux_allow_zabbix_can_network
+- name: "RedHat | change pgsql conf2"
+  lineinfile: dest=/var/lib/pgsql/data/pg_hba.conf state=present line="host    all             zabbix-server   127.0.0.1/32            md5"
+  when: database_type == 'pgsql'
+  tags:
+    - zabbix-server
+
+- name: "RedHat | Restart and Enable PostgreSQL"
+  shell: "systemctl restart postgresql && systemctl enable postgresql"
+  when: database_type == 'pgsql'
   tags:
     - zabbix-server
